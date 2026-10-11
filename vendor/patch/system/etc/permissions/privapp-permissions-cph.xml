@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- CDH: 官方 priv-app 的特权权限补声明。
+     官方 system 把 Nothing 的 OOBE 应用放在非标目录 /system/noth/priv-app/NTAura，
+     而整盘只有这个 marker 文件（/system/noth/etc/permissions/
+     aura_system_noth_etc_mkdir_permissions，0 字节），没有任何 privapp-permissions XML
+     （实测 2026-10-11 grep /system{,_ext}/etc/permissions、/product、/vendor、/odm 全无
+     "aura"）。ro.control_privapp_permissions=enforce 下 PermissionService.onSystemReady
+     直接抛 IllegalStateException：system_server 崩 -> zygote SIGKILL -> 4 次重启后
+     init 触发 volume abort_fuse，永远到不了 boot_completed（实例 3a-16/2 实测）。
+
+     落点必须是 system 侧：AOSP 规定 privapp-permissions.xml 只对**与自身同分区**的
+     特权应用生效，跨分区的条目会被忽略（source.android.com/docs/core/permissions/
+     perms-allowlist）。本盘先按 note13 口径把它放在 /vendor/etc/permissions，实测
+     SystemConfig 确实读取了该文件（实例 3a-16/3 日志 "Reading permissions from
+     /vendor/etc/permissions/privapp-permissions-cph.xml"），但崩溃照旧 —— 与上述
+     同分区规则一致。故本文件经 fstab.qcom 的 overlay 行落到 /system/etc/permissions：
+     overlay /system/etc/permissions ro,lowerdir=/mnt/vendor/system/etc/permissions/:
+     /system/etc/permissions（写法照搬 popsicle-16 同名行，patch.img 以 vdc 挂在
+     /mnt/vendor，其 system/etc/permissions 子树即本目录）。 -->
+<permissions>
+    <privapp-permissions package="com.aura.oobe.solutions">
+        <permission name="android.permission.INSTALL_PACKAGES"/>
+    </privapp-permissions>
+</permissions>

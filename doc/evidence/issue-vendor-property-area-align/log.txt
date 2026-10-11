@@ -1,0 +1,174 @@
+# 原始证据（issue-vendor-property-area-align, 2026-09-27）
+
+## A. 修复前：连字符类型未声明 → init 建区失败重启循环
+
+guest 串口日志 `out/core/daemon/runtime/note13-15/1/qemu.log`（旧镜像，17:56 起）：
+
+```
+[    0.386132][   T66] audit: type=1400 ... avc:  denied  { mac_admin } for  pid=1 comm="init" capability=33  scontext=u:r:init:s0 tcontext=u:r:init:s0 tclass=capability2 permissive=0
+[    0.386588][   T66] audit: type=1401 ... op=setxattr invalid_context="u:object_r:vendor_mtk_ctl_muxreport-daemon_prop:s0"
+[    0.387327][    T1] init: Failed to initialize property area
+[    0.387782][    T1] init: InitFatalReboot: signal 6
+```
+
+统计（同一日志）：
+
+```
+$ grep -o 'invalid_context="[^"]*"' qemu.log | sort | uniq -c | sort -rn
+  63 invalid_context="u:object_r:vendor_mtk_ctl_ril-proxy_prop:s0"
+  63 invalid_context="u:object_r:vendor_mtk_ctl_ril-daemon-mtk_prop:s0"
+  63 invalid_context="u:object_r:vendor_mtk_ctl_muxreport-daemon_prop:s0"
+$ grep -c mac_admin qemu.log        # 222（= 3 × 74，与 invalid_context 一一配对）
+$ grep -c "Failed to initialize property area" qemu.log   # 63 次重启循环
+```
+
+## B. 修复后：重建验证日志关键行（/tmp/gold_props_verify.log）
+
+```
+[ok] gold 属性类型对齐 CIL（plat vers 202404）：新增类型 281 个，复刻授权 1403 条
+     （gold 原句 585 条已合并去重；源域不存在的跳过 573 条）
+[18:13:28] gold prop types 标记命中: 1
+[18:54:19] boot_completed=1（20s）
+[18:54:20] 官方属性类型文件核对（282 个）:
+存在 282 缺失 0
+[18:54:20] lineage/自研类型抽样（应保留）:
+vendor_mesa_prop OK / vendor_graphics_prop OK / vendor_hwcomposer_prop OK /
+vendor_audio_prop OK / vendor_net_prop MISS（预期：gold vendor.net. 前缀归 vendor_mtk_network_prop）
+[18:54:20] 属性 set 拒绝数（基线 22）: 19
+[18:54:20] invalid_context（应为 0）: 0 | mac_admin denied（应 0）: 0
+[18:54:20] avc denied: 1
+[18:54:30] 默认网络: Active default network: 100
+[18:54:40] checker 云机注册数: 1
+```
+
+## C. 12 分钟稳定性观察（24 个样本）
+
+```
+[18:54:40] boot=1 anr=anr_2026-05-14-15-48-42-441 ps=[root 479 1 … zygote64|system 751 479 … system_server|]
+…
+[19:06:12] boot=1 anr=anr_2026-05-14-15-48-42-441 ps=[root 479 1 … zygote64|system 751 479 … system_server|]
+[19:06:42] == 完成 ==
+```
+
+- 样本数 24，`sys.boot_completed` 全程 = 1；
+- zygote64 PID **479**、system_server PID **751** 全程不变；
+- `/data/anr/` 最新文件始终是镜像自带的 `anr_2026-05-14-15-48-42-441`（无新 ANR）。
+
+## D. properties.native（device-checker 云机实测，run-00088）
+
+```
+count: 1193          # 属性条数
+files: len=755       # /dev/__properties__ 区域文件
+  例：u:object_r:vendor_mtk_ctl_ril-proxy_prop:s0（连字符类型在位）
+服务端 /api/devices：e85a924aad7556bf-cloud（在线；停/起 App 可复现上下线）
+```
+
+## E. 剩余 19 条属性 set 拒绝的归属核查
+
+- `ro.product.cpu.abilist[32|64]`、`ro.build.display.id`、`ro.rom.zone`、
+  `ro.recovery.*`、`ro.telephony.sim.count`、`persist.audio.button_jack.*` 等：
+  无 vendor 映射（类型归其它分区表/或本环境不设）——基线噪声口径内（基线 22）。
+- `vendor.camera.mdp.{cz,dre,hfg}.enable` → `vendor_mtkcam_prop`（gold 的 restricted 类型），
+  gold 的 setter 是 `mtk_hal_camera`（本机无此域，复刻时按源域不存在跳过）。
+
+## F. 真机 vs 云机 properties.native 对比（device-checker run-00091）
+
+```
+真机 c7018f1a5b299672 : files=744  count=1868
+云机 e85a924aad7556bf-cloud: files=755  count=1197
+
+gold vendor 活动类型 282；真机覆盖 282/282；云机覆盖 282/282
+
+仅真机有（云机缺）0:
+
+仅云机有（真机无）11:
+  vendor_audio_prop / vendor_create_partition_table_prop / vendor_fm_radio_app_prop /
+  vendor_graphics_config_prop / vendor_graphics_prop / vendor_hwcomposer_prop /
+  vendor_mesa_prop / vendor_minigbm_debug_prop / vendor_preinstall_check_prop /
+  vendor_recovery_ethernet_dhcp_prop / vendor_wifi_mac_prefix
+```
+
+结论（第一版，run-00091）：真机侧属性区云机**一个不缺**；云机多出的 11 个均为保留的
+lineage/自研映射，属预期差异。属性条数差（1868 vs 1197）来自机型/业务差异
+（真机有运营商与 MTK 业务属性），非命名空间对齐问题。
+
+### F.1 按"与真机完全一致"口径消除这 11 个多余区域文件（2026-09-27 晚）
+
+处置：`gold_props.prop_ctx_cmds` 改为 **`vendor_property_contexts` 全量替换为 gold 版**
+（不再保留任何 lineage 独有前缀规则）。
+
+被移除的 lineage 规则及类型（复现：lineage `vendor_a.img:/etc/selinux/vendor_property_contexts`
+中映射到下列类型且前缀 gold 没有的规则）：
+
+| lineage 前缀规则（节选） | 类型 |
+|---|---|
+| `persist.vendor.audio.` / `ro.hardware.audio.tinyalsa.` | `vendor_audio_prop` |
+| `vendor.create_partition_table.` | `vendor_create_partition_table_prop` |
+| `vendor.recovery.ethernet.dhcp.iface`（exact） | `vendor_recovery_ethernet_dhcp_prop` |
+| `ro.vendor.graphics` / `ro.vendor.graphics.` | `vendor_graphics_prop` |
+| `vendor.drm.gpu.vendor_name` / `vendor.mesa.` / `vendor.qemu.vk.log` | `vendor_mesa_prop` |
+| `vendor.preinstall_check.success`（exact） | `vendor_preinstall_check_prop` |
+| `ro.boot.cpuvulkan.version` / `ro.boot.hardware.{egl,gralloc,hwcomposer,vulkan}` / `ro.boot.lcd_density`（exact） | `vendor_graphics_config_prop` |
+| `ro.vendor.hwcomposer.{mode,pmem,display_finder_mode,display_framebuffer_format}`（exact） | `vendor_hwcomposer_prop` |
+| `vendor.minigbm.debug` | `vendor_minigbm_debug_prop` |
+| `ro.vendor.builtin_fm_antenna_support` / `ro.vendor.fm.use_audio_session`（exact） | `vendor_fm_radio_app_prop` |
+| `vendor.wifi.mac_prefix.*`（见 lineage 表） | `vendor_wifi_mac_prefix` |
+
+验证（重建后）：区域文件总数应为 **744 == 真机**，且 11 个类型全部消失
+（`[ -e /dev/__properties__/u:object_r:<type>:s0 ]` 为假）。结果见 §F.2。
+
+### F.2 消除结果（重建后实测，2026-09-27 20:35）
+
+```
+[20:35:23] boot_completed=1（20s）
+[20:35:23] 官方属性类型文件核对（282 个）:  存在 282 缺失 0
+[20:35:23] 已消除的多余类型（应全部 gone）: 11 个全部 gone
+[20:35:23] 属性 set 拒绝数（基线 22）: 20
+[20:35:23] invalid_context（应为 0）: 0 | mac_admin denied（应 0）: 0
+[20:35:34] 默认网络: Active default network: 100
+[20:35:44] checker 云机注册数: 1
+[20:35:48] 云机 744 文件 / 真机快照 744 文件
+           仅云机有: []
+           仅真机有: []
+```
+
+=> 云机 `/dev/__properties__` 区域文件集合与真机**完全一致（744 == 744，双向 diff 空）**。
+
+### F.3 最终在线复核（device-checker run-00094，双机同批下发，2026-09-27）
+
+```
+runId = run-00094   picked = [c7018f1a5b299672, e85a924aad7556bf-cloud]
+真机 c7018f1a5b299672 : succeeded  files=744  props=1868
+云机 e85a924aad7556bf-cloud: succeeded  files=744  props=1198
+
+== 仅区域文件清单对比（只看属性类型，不看属性值）==
+仅真机有: []
+仅云机有: []
+```
+
+## G. 属性上下文「文件」逐字节比对（真机 vs 云机，2026-09-27）
+
+```
+$ adb -s <dev> shell md5sum <path>        # 两侧同命令
+文件                                     真机 md5/字节        云机 md5/字节        一致
+plat_property_contexts                   54c2d331b0bb/112480  54c2d331b0bb/112480  ✓
+system_ext_property_contexts             77b978cc47ed/37195   77b978cc47ed/37195   ✓
+product_property_contexts                17a7f5c08e3a/920     17a7f5c08e3a/920     ✓
+odm_property_contexts                    1cad6dd405a8/1057    1cad6dd405a8/1057    ✓
+vendor_property_contexts                 e0a72697418d/63271   43e9b36e9d3c/63421   ✗
+```
+
+- 真机 `vendor_property_contexts` 与 gold 基包（`roms/gold_images_OS3.0.9.0…/vendor_a/etc/selinux/`）
+  **md5 完全一致**（`e0a72697418dd10da712c9a726f5598a`）——对齐口径即"逐字节等于 gold"。
+- 云机多出的 3 行（自身 keymint 修复注入，gold/真机均无）：
+
+```
+> # cdh note13-5G-15: remote keymint boot security_patch set
+> ro.vendor.boot_security_patch u:object_r:vendor_security_patch_level_prop:s0 exact string
+```
+
+- 真机该属性**无映射**、运行时取值为空（`getprop ro.vendor.boot_security_patch` 空）；
+  云机因远端 keymint HAL `std::stoi(getProperty(...))` 依赖非空值，保留此放行。
+- **决策（用户确认，2026-09-27）：保留这 3 行**，作为唯一刻意偏差固证在案；
+  区域文件清单不受影响（`vendor_security_patch_level_prop` 亦由 plat 的
+  `ro.vendor.build.security_patch` exact 规则引用，744 集合不变）。

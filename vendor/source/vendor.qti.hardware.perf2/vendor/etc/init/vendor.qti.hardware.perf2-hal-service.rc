@@ -1,0 +1,16 @@
+# 3a-16 收编的官方 QTI perf2 HAL（背景见同目录 build.py）。
+#
+# 官方 system 的 framework（android.util.BoostFramework → com.qualcomm.qti.Performance）
+# 在每个 app 的 handleBindApplication 里同步连 QTI perf HAL；HAL 缺失时
+# system_ext 的 vendor.perfservice 一个事务都收不到，app 主线程全部停在
+# IPerfManager.setClientBinder 上 → 冷启动 9~25s + 成片
+# 「failed to complete startup」ANR（实测 2026-10-11，实例 runtime/3a-16/10）。
+#
+# 组未沿用官方 rc 的 oem_2907（QTI 专属组，实测本盘 /vendor/etc/group 与
+# /system/etc/group 都没有它，缺失组会让 init 起不来该服务）。
+service perf2-hal-1-0 /vendor/bin/hw/vendor.qti.hardware.perf2-hal-service
+    class hal
+    user root
+    group root system readproc
+    seclabel u:r:vendor_hal_perf_default:s0
+    interface aidl vendor.qti.hardware.perf2.IPerf/default

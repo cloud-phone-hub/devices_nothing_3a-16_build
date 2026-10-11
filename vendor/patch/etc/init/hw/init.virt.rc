@@ -1,0 +1,91 @@
+import /vendor/etc/init/hw/init.low_performance.rc
+
+# Block devices
+on early-fs
+    symlink /dev/block/by-name/BIOS /dev/block/by-name/BIOS_a
+    symlink /dev/block/by-name/BIOS /dev/block/by-name/BIOS_b
+    symlink /dev/block/by-name/EFI /dev/block/by-name/EFI_a
+    symlink /dev/block/by-name/EFI /dev/block/by-name/EFI_b
+
+# Boot manager
+service vendor.grub-editenv-set-android_theme /vendor/bin/grub-editenv /mnt/vendor/persist/grubenv set android_theme=${persist.sys.theme}
+    user system
+    group system
+    disabled
+    oneshot
+
+on property:persist.sys.theme=*
+    start vendor.grub-editenv-set-android_theme
+
+# Display
+on early-init
+    # 真机由 init.qcom.rc 取 ${vendor.display.lcd_density}（QCOM 显示 HAL 按面板物理尺寸
+    # 写入），本盘未移植该 HAL，故直接给 6.77"/1080x2400 面板的 ~388dpi；底包兜底 160 会让
+    # 整屏 UI 缩到 688dp 宽。
+    setprop ro.sf.lcd_density ${ro.boot.lcd_density:-388}
+
+# DLKM Loader
+service vendor.dlkm_loader /vendor/bin/dlkm_loader
+    class main
+    user root
+    group root system
+    disabled
+    oneshot
+
+# DLKM Loader + 固件搜索路径（本文件为 build/vendor/patch 覆盖件，追加于底包之后）。
+# 注：popsicle-16/note13 在此还有一段 Remote KeyMint 门控（wait /dev/hvc3 + start
+# vendor.keymint-default）。本盘 keymint HAL 尚未移植（build/vendor/source/_pending），
+# 该服务无定义 → `start` 直接失败并让整个 on post-fs 动作中断，且 hvc3 未就绪时
+# wait 会占满 30s 拖慢引导；故本盘不带该门控，移植 keymint 时随 sepolicy 的 keymint
+# 段一并补回。
+on post-fs
+    write /sys/module/firmware_class/parameters/path /vendor/firmware_mnt/
+    start vendor.dlkm_loader
+
+# Graphics
+on property:ro.vendor.graphics=mesa
+    setprop ro.hardware.egl mesa
+
+on property:ro.vendor.graphics=mesa_swrast
+    setprop ro.hardware.egl mesa
+    setprop ro.hardware.vulkan lvp
+    setprop ro.opengles.version 196610
+    setprop ro.surface_flinger.native_window_buffers_format 5
+    setprop vendor.mesa.android.no.kms.swrast true
+    setprop vendor.mesa.libgl.always.software true
+
+on property:ro.vendor.graphics=swiftshader
+    setprop ro.cpuvulkan.version 4202496
+    setprop ro.hardware.egl angle
+    setprop ro.hardware.vulkan pastel
+    setprop ro.opengles.version 196609
+    setprop ro.surface_flinger.native_window_buffers_format 5
+
+on early-boot && property:ro.boot.hwui_renderer=*
+    setprop debug.hwui.renderer ${ro.boot.hwui_renderer}
+
+on early-boot && property:ro.vendor.graphics.gpu=vkms
+    setprop ro.vendor.graphics ${ro.boot.graphics:-swiftshader}
+
+# Suspend blocker
+service suspend_blocker /vendor/bin/suspend_blocker
+    class early_hal # Start together with system_suspend HAL
+    group system
+    user root
+
+# VirtWifi
+service setup_wifi /vendor/bin/setup_wifi --interface=${ro.vendor.virtwifi.port}
+    override
+    disabled
+    oneshot
+    user root
+    group root
+
+on post-fs-data && property:ro.boot.wifi_impl=virt_wifi
+    start setup_wifi
+
+# Wi-Fi
+on early-boot
+    mkdir /data/vendor/wifi 0770 wifi wifi
+    mkdir /data/vendor/wifi/wpa 0770 wifi wifi
+    mkdir /data/vendor/wifi/wpa/sockets 0770 wifi wifi
